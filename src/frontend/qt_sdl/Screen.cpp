@@ -222,6 +222,7 @@ void ScreenPanel::resizeEvent(QResizeEvent* event)
 void ScreenPanel::mousePressEvent(QMouseEvent* event)
 {
     event->accept();
+    if (!emuInstance->emuIsActive()) { touching = false; return; }
     if (event->button() != Qt::LeftButton) return;
 
     int x = event->pos().x();
@@ -238,6 +239,7 @@ void ScreenPanel::mousePressEvent(QMouseEvent* event)
 void ScreenPanel::mouseReleaseEvent(QMouseEvent* event)
 {
     event->accept();
+    if (!emuInstance->emuIsActive()) { touching = false; return; }
     if (event->button() != Qt::LeftButton) return;
 
     if (touching)
@@ -254,6 +256,7 @@ void ScreenPanel::mouseMoveEvent(QMouseEvent* event)
 
     showCursor();
 
+    if (!emuInstance->emuIsActive()) return;
     //if (!(event->buttons() & Qt::LeftButton)) return;
     if (!touching) return;
 
@@ -270,6 +273,7 @@ void ScreenPanel::mouseMoveEvent(QMouseEvent* event)
 void ScreenPanel::tabletEvent(QTabletEvent* event)
 {
     event->accept();
+    if (!emuInstance->emuIsActive()) { touching = false; return; }
 
     switch(event->type())
     {
@@ -313,6 +317,7 @@ void ScreenPanel::touchEvent(QTouchEvent* event)
 #endif
 
     event->accept();
+    if (!emuInstance->emuIsActive()) { touching = false; return; }
 
     switch(event->type())
     {
@@ -736,6 +741,8 @@ ScreenPanelGL::ScreenPanelGL(QWidget* parent) : ScreenPanel(parent)
     setAttribute(Qt::WA_KeyCompression, false);
     setFocusPolicy(Qt::StrongFocus);
     setMinimumSize(screenGetMinSize());
+
+    glInited = false;
 }
 
 ScreenPanelGL::~ScreenPanelGL()
@@ -747,14 +754,14 @@ bool ScreenPanelGL::createContext()
 
     // if our parent window is parented to another window, we will
     // share our OpenGL context with that window
+    MainWindow* ourwin = (MainWindow*)parentWidget();
     MainWindow* parentwin = (MainWindow*)parentWidget()->parentWidget();
-    if (parentwin)
+    //if (parentwin)
+    if (ourwin->getWindowID() != 0)
     {
         if (windowinfo.has_value())
-        {
-            glContext = parentwin->getOGLContext()->CreateSharedContext(*windowinfo);
-            glContext->DoneCurrent();
-        }
+            if (glContext = parentwin->getOGLContext()->CreateSharedContext(*windowinfo))
+                glContext->DoneCurrent();
     }
     else
     {
@@ -762,10 +769,8 @@ bool ScreenPanelGL::createContext()
                 GL::Context::Version{GL::Context::Profile::Core, 4, 3},
                 GL::Context::Version{GL::Context::Profile::Core, 3, 2}};
         if (windowinfo.has_value())
-        {
-            glContext = GL::Context::Create(*windowinfo, versionsToTry);
-            glContext->DoneCurrent();
-        }
+            if (glContext = GL::Context::Create(*windowinfo, versionsToTry))
+                glContext->DoneCurrent();
     }
 
     return glContext != nullptr;
@@ -781,6 +786,7 @@ void ScreenPanelGL::setSwapInterval(int intv)
 void ScreenPanelGL::initOpenGL()
 {
     if (!glContext) return;
+    if (glInited) return;
 
     glContext->MakeCurrent();
 
@@ -877,11 +883,13 @@ void ScreenPanelGL::initOpenGL()
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)(0));
 
     transferLayout();
+    glInited = true;
 }
 
 void ScreenPanelGL::deinitOpenGL()
 {
     if (!glContext) return;
+    if (!glInited) return;
 
     glDeleteTextures(1, &screenTexture);
 
@@ -906,6 +914,7 @@ void ScreenPanelGL::deinitOpenGL()
     glContext->DoneCurrent();
 
     lastScreenWidth = lastScreenHeight = -1;
+    glInited = false;
 }
 
 void ScreenPanelGL::makeCurrentGL()
@@ -947,9 +956,6 @@ void ScreenPanelGL::drawScreenGL()
 {
     if (!glContext) return;
 
-    auto nds = emuInstance->getNDS();
-    if (!nds) return;
-
     auto emuThread = emuInstance->getEmuThread();
 
     glContext->MakeCurrent();
@@ -968,49 +974,53 @@ void ScreenPanelGL::drawScreenGL()
 
     glViewport(0, 0, w, h);
 
-    glUseProgram(screenShaderProgram);
-    glUniform2f(screenShaderScreenSizeULoc, w / factor, h / factor);
+    if (emuThread->emuIsActive())
+    {
+        auto nds = emuInstance->getNDS();
 
-    int frontbuf = emuThread->FrontBuffer;
-    glActiveTexture(GL_TEXTURE0);
+        glUseProgram(screenShaderProgram);
+        glUniform2f(screenShaderScreenSizeULoc, w / factor, h / factor);
+
+        int frontbuf = emuThread->FrontBuffer;
+        glActiveTexture(GL_TEXTURE0);
 
 #ifdef OGLRENDERER_ENABLED
-    if (nds->GPU.GetRenderer3D().Accelerated)
-    {
-        // hardware-accelerated render
-        nds->GPU.GetRenderer3D().BindOutputTexture(frontbuf);
-    }
-    else
-#endif
-    {
-        // regular render
-        glBindTexture(GL_TEXTURE_2D, screenTexture);
-
-        if (nds->GPU.Framebuffer[frontbuf][0] && nds->GPU.Framebuffer[frontbuf][1])
+        if (nds->GPU.GetRenderer3D().Accelerated)
         {
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 192, GL_RGBA,
-                            GL_UNSIGNED_BYTE, nds->GPU.Framebuffer[frontbuf][0].get());
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 192+2, 256, 192, GL_RGBA,
-                            GL_UNSIGNED_BYTE, nds->GPU.Framebuffer[frontbuf][1].get());
+            // hardware-accelerated render
+            nds->GPU.GetRenderer3D().BindOutputTexture(frontbuf);
+        } else
+#endif
+        {
+            // regular render
+            glBindTexture(GL_TEXTURE_2D, screenTexture);
+
+            if (nds->GPU.Framebuffer[frontbuf][0] && nds->GPU.Framebuffer[frontbuf][1])
+            {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 192, GL_RGBA,
+                                GL_UNSIGNED_BYTE, nds->GPU.Framebuffer[frontbuf][0].get());
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 192 + 2, 256, 192, GL_RGBA,
+                                GL_UNSIGNED_BYTE, nds->GPU.Framebuffer[frontbuf][1].get());
+            }
         }
+
+        screenSettingsLock.lock();
+
+        GLint filter = this->filter ? GL_LINEAR : GL_NEAREST;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+
+        glBindBuffer(GL_ARRAY_BUFFER, screenVertexBuffer);
+        glBindVertexArray(screenVertexArray);
+
+        for (int i = 0; i < numScreens; i++)
+        {
+            glUniformMatrix2x3fv(screenShaderTransformULoc, 1, GL_TRUE, screenMatrix[i]);
+            glDrawArrays(GL_TRIANGLES, screenKind[i] == 0 ? 0 : 2 * 3, 2 * 3);
+        }
+
+        screenSettingsLock.unlock();
     }
-
-    screenSettingsLock.lock();
-
-    GLint filter = this->filter ? GL_LINEAR : GL_NEAREST;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-
-    glBindBuffer(GL_ARRAY_BUFFER, screenVertexBuffer);
-    glBindVertexArray(screenVertexArray);
-
-    for (int i = 0; i < numScreens; i++)
-    {
-        glUniformMatrix2x3fv(screenShaderTransformULoc, 1, GL_TRUE, screenMatrix[i]);
-        glDrawArrays(GL_TRIANGLES, screenKind[i] == 0 ? 0 : 2*3, 2*3);
-    }
-
-    screenSettingsLock.unlock();
 
     osdUpdate();
     if (osdEnabled)
